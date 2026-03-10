@@ -508,3 +508,96 @@ func TestEvaluateBulk_WorkerCount(t *testing.T) {
 	_ = current
 	_ = atomic.AddInt64
 }
+
+func TestEvaluate_WithTracing(t *testing.T) {
+	resolver := &testAliasResolver{paths: map[string]string{}}
+	rf, rfa := testFieldResolvers(resolver)
+	eng := New(resolver,
+		WithFieldResolvers(rf, rfa),
+		WithTracing(true),
+	)
+	resource := makeResource(t, "/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Storage/storageAccounts/sa1",
+		"Microsoft.Storage/storageAccounts", "eastus")
+
+	def := &PolicyDefinition{
+		ID:         "policy1",
+		PolicyRule: makePolicyRule(t, "type", "equals", "Microsoft.Storage/storageAccounts", "audit"),
+	}
+	assignment := &Assignment{
+		ID:                 "assign1",
+		Scope:              "/subscriptions/sub1",
+		PolicyDefinitionID: "policy1",
+	}
+
+	result := eng.Evaluate(context.Background(), EvaluateInput{
+		Definition: def,
+		Assignment: assignment,
+		Resource:   resource,
+	})
+
+	assert.Equal(t, NonCompliant, result.State)
+	require.NotNil(t, result.Trace)
+	assert.NotEmpty(t, result.Trace.Steps)
+	// Should have at least one field step
+	found := false
+	for _, s := range result.Trace.Steps {
+		if s.Type == "field" {
+			found = true
+			assert.Equal(t, "type", s.Field)
+		}
+	}
+	assert.True(t, found, "should have a field trace step")
+	assert.NotEmpty(t, result.Trace.Summary())
+}
+
+func TestEvaluate_ReasonsOnNonCompliant(t *testing.T) {
+	eng := makeEngine(t)
+	resource := makeResource(t, "/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Storage/storageAccounts/sa1",
+		"Microsoft.Storage/storageAccounts", "eastus")
+
+	def := &PolicyDefinition{
+		ID:         "policy1",
+		PolicyRule: makePolicyRule(t, "type", "equals", "Microsoft.Storage/storageAccounts", "audit"),
+	}
+	assignment := &Assignment{
+		ID:                 "assign1",
+		Scope:              "/subscriptions/sub1",
+		PolicyDefinitionID: "policy1",
+	}
+
+	result := eng.Evaluate(context.Background(), EvaluateInput{
+		Definition: def,
+		Assignment: assignment,
+		Resource:   resource,
+	})
+
+	assert.Equal(t, NonCompliant, result.State)
+	require.NotEmpty(t, result.Reasons)
+	assert.Equal(t, "type", result.Reasons[0].Field)
+	assert.Equal(t, "equals", result.Reasons[0].Operator)
+}
+
+func TestEvaluate_NoTraceWhenDisabled(t *testing.T) {
+	eng := makeEngine(t) // tracing off by default
+	resource := makeResource(t, "/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Storage/storageAccounts/sa1",
+		"Microsoft.Storage/storageAccounts", "eastus")
+
+	def := &PolicyDefinition{
+		ID:         "policy1",
+		PolicyRule: makePolicyRule(t, "type", "equals", "Microsoft.Storage/storageAccounts", "audit"),
+	}
+	assignment := &Assignment{
+		ID:                 "assign1",
+		Scope:              "/subscriptions/sub1",
+		PolicyDefinitionID: "policy1",
+	}
+
+	result := eng.Evaluate(context.Background(), EvaluateInput{
+		Definition: def,
+		Assignment: assignment,
+		Resource:   resource,
+	})
+
+	assert.Equal(t, NonCompliant, result.State)
+	assert.Nil(t, result.Trace)
+}

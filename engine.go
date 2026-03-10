@@ -96,6 +96,7 @@ type EvaluationResult struct {
 	PolicyID     string // definition ID
 	AssignmentID string // assignment ID
 	Reasons      []result.Reason
+	Trace        *result.Trace // nil unless tracing enabled
 	Errors       []error
 }
 
@@ -145,7 +146,11 @@ func (e *Engine) Evaluate(ctx context.Context, input EvaluateInput) EvaluationRe
 
 	// 6. Determine compliance
 	if !matched {
-		return EvaluationResult{State: Compliant, Effect: string(eff)}
+		res := EvaluationResult{State: Compliant, Effect: string(eff)}
+		if e.tracing && evalCtx.Trace != nil {
+			res.Trace = evalCtx.Trace
+		}
+		return res
 	}
 
 	// 7. For AINE/DINE, check existence
@@ -163,17 +168,22 @@ func (e *Engine) Evaluate(ctx context.Context, input EvaluateInput) EvaluationRe
 	}
 
 	// 8. If-matched + non-existence effects → NonCompliant
-	return EvaluationResult{
-		State:  NonCompliant,
-		Effect: string(eff),
+	res := EvaluationResult{
+		State:   NonCompliant,
+		Effect:  string(eff),
+		Reasons: evalCtx.Reasons,
 	}
+	if e.tracing && evalCtx.Trace != nil {
+		res.Trace = evalCtx.Trace
+	}
+	return res
 }
 
 // buildEvalContext creates a condition.EvalContext wired to the engine's resolvers.
 func (e *Engine) buildEvalContext(ctx context.Context, resource *Resource, assignment *Assignment, def *PolicyDefinition) *condition.EvalContext {
 	params := mergeParameters(assignment.Parameters, def.Parameters)
 
-	return &condition.EvalContext{
+	evalCtx := &condition.EvalContext{
 		ResourceJSON: string(resource.Raw),
 		ResolveField: func(json string, field string) (any, error) {
 			if e.resolveField != nil {
@@ -194,6 +204,10 @@ func (e *Engine) buildEvalContext(ctx context.Context, resource *Resource, assig
 		CountScopes: nil,
 		Tracing:     e.tracing,
 	}
+	if e.tracing {
+		evalCtx.Trace = result.NewTrace()
+	}
+	return evalCtx
 }
 
 // evalExpression evaluates an ARM template expression using goarmfunctions.

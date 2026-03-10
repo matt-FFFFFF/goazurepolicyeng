@@ -3,6 +3,9 @@ package condition
 import (
 	"fmt"
 	"strings"
+	"time"
+
+	"github.com/matt-FFFFFF/goazurepolicyeng/result"
 )
 
 // Node is the interface for all condition tree nodes.
@@ -16,26 +19,6 @@ type FieldResolver func(resourceJSON string, field string) (any, error)
 // FieldArrayResolver resolves a [*] array field reference.
 type FieldArrayResolver func(resourceJSON string, field string) ([]any, error)
 
-// Trace records evaluation steps for diagnostics.
-type Trace struct {
-	Steps []TraceStep
-}
-
-// TraceStep is a single evaluation step.
-type TraceStep struct {
-	Depth   int
-	Type    string // "allOf", "anyOf", "not", "field", "value", "count"
-	Result  bool
-	Field   string
-	Value   any
-	Details string
-}
-
-// Record adds a step to the trace.
-func (t *Trace) Record(step TraceStep) {
-	t.Steps = append(t.Steps, step)
-}
-
 // EvalContext carries evaluation state through the condition tree.
 type EvalContext struct {
 	ResourceJSON      string
@@ -48,7 +31,16 @@ type EvalContext struct {
 	// Empty string means the default/unnamed scope.
 	ResolveCurrent func(name string) (any, bool)
 	Tracing        bool
-	Trace          *Trace
+	Trace          *result.Trace
+	Reasons        []result.Reason // collected during evaluation
+	depth          int             // current evaluation depth for trace indentation
+}
+
+// child returns a shallow copy of EvalContext with incremented depth.
+func (ctx *EvalContext) child() *EvalContext {
+	c := *ctx
+	c.depth = ctx.depth + 1
+	return &c
 }
 
 // AllOf requires all children to be true (logical AND).
@@ -57,16 +49,31 @@ type AllOf struct {
 }
 
 func (a *AllOf) Evaluate(ctx *EvalContext) (bool, error) {
+	var start time.Time
+	if ctx.Tracing {
+		start = time.Now()
+	}
+	var res bool = true
 	for _, c := range a.Conditions {
-		result, err := c.Evaluate(ctx)
+		r, err := c.Evaluate(ctx.child())
 		if err != nil {
 			return false, err
 		}
-		if !result {
-			return false, nil
+		if !r {
+			res = false
+			break
 		}
 	}
-	return true, nil
+	if ctx.Tracing && ctx.Trace != nil {
+		ctx.Trace.Record(result.TraceStep{
+			Depth:    ctx.depth,
+			Type:     "allOf",
+			Result:   res,
+			Duration: time.Since(start),
+			Detail:   fmt.Sprintf("allOf: %d conditions, result=%v", len(a.Conditions), res),
+		})
+	}
+	return res, nil
 }
 
 // AnyOf requires at least one child to be true (logical OR).
@@ -75,16 +82,31 @@ type AnyOf struct {
 }
 
 func (a *AnyOf) Evaluate(ctx *EvalContext) (bool, error) {
+	var start time.Time
+	if ctx.Tracing {
+		start = time.Now()
+	}
+	var res bool
 	for _, c := range a.Conditions {
-		result, err := c.Evaluate(ctx)
+		r, err := c.Evaluate(ctx.child())
 		if err != nil {
 			return false, err
 		}
-		if result {
-			return true, nil
+		if r {
+			res = true
+			break
 		}
 	}
-	return false, nil
+	if ctx.Tracing && ctx.Trace != nil {
+		ctx.Trace.Record(result.TraceStep{
+			Depth:    ctx.depth,
+			Type:     "anyOf",
+			Result:   res,
+			Duration: time.Since(start),
+			Detail:   fmt.Sprintf("anyOf: %d conditions, result=%v", len(a.Conditions), res),
+		})
+	}
+	return res, nil
 }
 
 // Not negates its child.
@@ -93,11 +115,25 @@ type Not struct {
 }
 
 func (n *Not) Evaluate(ctx *EvalContext) (bool, error) {
-	result, err := n.Condition.Evaluate(ctx)
+	var start time.Time
+	if ctx.Tracing {
+		start = time.Now()
+	}
+	r, err := n.Condition.Evaluate(ctx.child())
 	if err != nil {
 		return false, err
 	}
-	return !result, nil
+	res := !r
+	if ctx.Tracing && ctx.Trace != nil {
+		ctx.Trace.Record(result.TraceStep{
+			Depth:    ctx.depth,
+			Type:     "not",
+			Result:   res,
+			Duration: time.Since(start),
+			Detail:   fmt.Sprintf("not: child=%v, result=%v", r, res),
+		})
+	}
+	return res, nil
 }
 
 // FieldCondition is a leaf: resolve a field alias and compare with an operator.
@@ -108,10 +144,18 @@ type FieldCondition struct {
 }
 
 func (f *FieldCondition) Evaluate(ctx *EvalContext) (bool, error) {
+	var start time.Time
+	if ctx.Tracing {
+		start = time.Now()
+	}
+
 	op, ok := ctx.Operators.Get(f.Operator)
 	if !ok {
 		return false, fmt.Errorf("unknown operator: %s", f.Operator)
 	}
+
+	var res bool
+	var resolvedValue any
 
 	// Check if this is an array alias with [*]
 	if strings.Contains(f.Field, "[*]") {
@@ -120,26 +164,60 @@ func (f *FieldCondition) Evaluate(ctx *EvalContext) (bool, error) {
 			return false, err
 		}
 		if len(values) == 0 {
-			return true, nil // vacuous truth — empty array
-		}
-		for _, v := range values {
-			result, err := op.Evaluate(v, f.Value)
-			if err != nil {
-				return false, err
+			res = true // vacuous truth — empty array
+		} else {
+			res = true
+			for _, v := range values {
+				r, err := op.Evaluate(v, f.Value)
+				if err != nil {
+					return false, err
+				}
+				if !r {
+					res = false
+					break
+				}
 			}
-			if !result {
-				return false, nil
+			if len(values) > 0 {
+				resolvedValue = values
 			}
 		}
-		return true, nil
+	} else {
+		// Scalar field
+		value, err := ctx.ResolveField(ctx.ResourceJSON, f.Field)
+		if err != nil {
+			return false, err
+		}
+		resolvedValue = value
+		res, err = op.Evaluate(value, f.Value)
+		if err != nil {
+			return false, err
+		}
 	}
 
-	// Scalar field
-	value, err := ctx.ResolveField(ctx.ResourceJSON, f.Field)
-	if err != nil {
-		return false, err
+	if res {
+		ctx.Reasons = append(ctx.Reasons, result.Reason{
+			Field:    f.Field,
+			Operator: f.Operator,
+			Expected: f.Value,
+			Actual:   resolvedValue,
+			Message:  fmt.Sprintf("Field '%s' %s '%v' (actual: '%v')", f.Field, f.Operator, f.Value, resolvedValue),
+		})
 	}
-	return op.Evaluate(value, f.Value)
+
+	if ctx.Tracing && ctx.Trace != nil {
+		ctx.Trace.Record(result.TraceStep{
+			Depth:    ctx.depth,
+			Type:     "field",
+			Result:   res,
+			Duration: time.Since(start),
+			Field:    f.Field,
+			Operator: f.Operator,
+			Expected: f.Value,
+			Actual:   resolvedValue,
+			Detail:   fmt.Sprintf("field '%s' %s '%v': actual='%v' → %v", f.Field, f.Operator, f.Value, resolvedValue, res),
+		})
+	}
+	return res, nil
 }
 
 // ValueCondition evaluates an ARM expression and compares the result.
@@ -150,6 +228,11 @@ type ValueCondition struct {
 }
 
 func (v *ValueCondition) Evaluate(ctx *EvalContext) (bool, error) {
+	var start time.Time
+	if ctx.Tracing {
+		start = time.Now()
+	}
+
 	if ctx.EvalExpression == nil {
 		return false, fmt.Errorf("ARM expression evaluation not configured")
 	}
@@ -163,7 +246,24 @@ func (v *ValueCondition) Evaluate(ctx *EvalContext) (bool, error) {
 		return false, fmt.Errorf("evaluating expression %q: %w", v.Value, err)
 	}
 
-	return op.Evaluate(resolved, v.Operand)
+	res, err := op.Evaluate(resolved, v.Operand)
+	if err != nil {
+		return false, err
+	}
+
+	if ctx.Tracing && ctx.Trace != nil {
+		ctx.Trace.Record(result.TraceStep{
+			Depth:    ctx.depth,
+			Type:     "value",
+			Result:   res,
+			Duration: time.Since(start),
+			Operator: v.Operator,
+			Expected: v.Operand,
+			Actual:   resolved,
+			Detail:   fmt.Sprintf("value '%s' %s '%v': resolved='%v' → %v", v.Value, v.Operator, v.Operand, resolved, res),
+		})
+	}
+	return res, nil
 }
 
 // CountCondition evaluates a count expression.
@@ -181,6 +281,11 @@ type CountCondition struct {
 }
 
 func (c *CountCondition) Evaluate(ctx *EvalContext) (bool, error) {
+	var start time.Time
+	if ctx.Tracing {
+		start = time.Now()
+	}
+
 	op, ok := ctx.Operators.Get(c.Operator)
 	if !ok {
 		return false, fmt.Errorf("unknown operator: %s", c.Operator)
@@ -203,16 +308,14 @@ func (c *CountCondition) Evaluate(ctx *EvalContext) (bool, error) {
 				// the count field resolve to just the current element.
 				parentResolveField := childCtx.ResolveField
 				parentResolveFieldArray := childCtx.ResolveFieldArray
-				fieldPrefix := c.Field // e.g. "properties.networkAcls.ipRules[*]"
+				fieldPrefix := c.Field
 
 				childCtx.ResolveFieldArray = func(resourceJSON string, field string) ([]any, error) {
-					// If the field starts with our count field prefix, resolve from current element
 					if field == fieldPrefix {
 						return []any{v}, nil
 					}
 					if strings.HasPrefix(field, fieldPrefix) && len(field) > len(fieldPrefix) && field[len(fieldPrefix)] == '.' {
-						// e.g. "ipRules[*].action" → extract ".action" from current element
-						suffix := field[len(fieldPrefix)+1:] // after the "."
+						suffix := field[len(fieldPrefix)+1:]
 						if elem, ok := v.(map[string]any); ok {
 							val := resolveNestedProperty(elem, suffix)
 							return []any{val}, nil
@@ -223,7 +326,6 @@ func (c *CountCondition) Evaluate(ctx *EvalContext) (bool, error) {
 				}
 
 				childCtx.ResolveField = func(resourceJSON string, field string) (any, error) {
-					// Check count scopes for [*] alias resolution
 					if field == fieldPrefix {
 						return v, nil
 					}
@@ -275,11 +377,30 @@ func (c *CountCondition) Evaluate(ctx *EvalContext) (bool, error) {
 		}
 	}
 
-	return op.Evaluate(count, c.Operand)
+	res, err := op.Evaluate(count, c.Operand)
+	if err != nil {
+		return false, err
+	}
+
+	if ctx.Tracing && ctx.Trace != nil {
+		countVal := count
+		ctx.Trace.Record(result.TraceStep{
+			Depth:    ctx.depth,
+			Type:     "count",
+			Result:   res,
+			Duration: time.Since(start),
+			Operator: c.Operator,
+			Expected: c.Operand,
+			Count:    &countVal,
+			Detail:   fmt.Sprintf("count: %d %s %v → %v", count, c.Operator, c.Operand, res),
+		})
+	}
+	return res, nil
 }
 
 func (c *CountCondition) childContext(ctx *EvalContext, currentElement any) *EvalContext {
 	childCtx := *ctx
+	childCtx.depth = ctx.depth + 1
 	if childCtx.CountScopes == nil {
 		childCtx.CountScopes = make(map[string]any)
 	} else {
@@ -298,12 +419,10 @@ func (c *CountCondition) childContext(ctx *EvalContext, currentElement any) *Eva
 		}
 	}
 	childCtx.CountScopes[name] = currentElement
-	// Also store as "default" for unnamed access
 	if c.Name == "" {
 		childCtx.CountScopes["default"] = currentElement
 	}
 
-	// Set up ResolveCurrent to read from count scopes
 	scopes := childCtx.CountScopes
 	childCtx.ResolveCurrent = func(scopeName string) (any, bool) {
 		if scopeName == "" {
