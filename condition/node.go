@@ -44,8 +44,11 @@ type EvalContext struct {
 	Operators         *OperatorRegistry
 	EvalExpression    func(expr string) (any, error)
 	CountScopes       map[string]any
-	Tracing           bool
-	Trace             *Trace
+	// ResolveCurrent returns the current count iteration value for the given name.
+	// Empty string means the default/unnamed scope.
+	ResolveCurrent func(name string) (any, bool)
+	Tracing        bool
+	Trace          *Trace
 }
 
 // AllOf requires all children to be true (logical AND).
@@ -196,6 +199,44 @@ func (c *CountCondition) Evaluate(ctx *EvalContext) (bool, error) {
 		} else {
 			for _, v := range values {
 				childCtx := c.childContext(ctx, v)
+				// Per-element scoping: wrap resolvers so [*] aliases matching
+				// the count field resolve to just the current element.
+				parentResolveField := childCtx.ResolveField
+				parentResolveFieldArray := childCtx.ResolveFieldArray
+				fieldPrefix := c.Field // e.g. "properties.networkAcls.ipRules[*]"
+
+				childCtx.ResolveFieldArray = func(resourceJSON string, field string) ([]any, error) {
+					// If the field starts with our count field prefix, resolve from current element
+					if field == fieldPrefix {
+						return []any{v}, nil
+					}
+					if strings.HasPrefix(field, fieldPrefix) && len(field) > len(fieldPrefix) && field[len(fieldPrefix)] == '.' {
+						// e.g. "ipRules[*].action" → extract ".action" from current element
+						suffix := field[len(fieldPrefix)+1:] // after the "."
+						if elem, ok := v.(map[string]any); ok {
+							val := resolveNestedProperty(elem, suffix)
+							return []any{val}, nil
+						}
+						return []any{nil}, nil
+					}
+					return parentResolveFieldArray(resourceJSON, field)
+				}
+
+				childCtx.ResolveField = func(resourceJSON string, field string) (any, error) {
+					// Check count scopes for [*] alias resolution
+					if field == fieldPrefix {
+						return v, nil
+					}
+					if strings.HasPrefix(field, fieldPrefix) && len(field) > len(fieldPrefix) && field[len(fieldPrefix)] == '.' {
+						suffix := field[len(fieldPrefix)+1:]
+						if elem, ok := v.(map[string]any); ok {
+							return resolveNestedProperty(elem, suffix), nil
+						}
+						return nil, nil
+					}
+					return parentResolveField(resourceJSON, field)
+				}
+
 				result, err := c.Where.Evaluate(childCtx)
 				if err != nil {
 					return false, err
@@ -218,27 +259,12 @@ func (c *CountCondition) Evaluate(ctx *EvalContext) (bool, error) {
 			return false, fmt.Errorf("count value expression did not return array")
 		}
 
-		name := c.Name
-		if name == "" {
-			name = "default"
-		}
-
 		if c.Where == nil {
 			count = len(arr)
 		} else {
 			for _, v := range arr {
-				childCtx := *ctx
-				if childCtx.CountScopes == nil {
-					childCtx.CountScopes = make(map[string]any)
-				} else {
-					newScopes := make(map[string]any, len(ctx.CountScopes)+1)
-					for k, val := range ctx.CountScopes {
-						newScopes[k] = val
-					}
-					childCtx.CountScopes = newScopes
-				}
-				childCtx.CountScopes[name] = v
-				result, err := c.Where.Evaluate(&childCtx)
+				childCtx := c.childContext(ctx, v)
+				result, err := c.Where.Evaluate(childCtx)
 				if err != nil {
 					return false, err
 				}
@@ -265,8 +291,44 @@ func (c *CountCondition) childContext(ctx *EvalContext, currentElement any) *Eva
 	}
 	name := c.Name
 	if name == "" {
-		name = c.Field
+		if c.Field != "" {
+			name = c.Field
+		} else {
+			name = "default"
+		}
 	}
 	childCtx.CountScopes[name] = currentElement
+	// Also store as "default" for unnamed access
+	if c.Name == "" {
+		childCtx.CountScopes["default"] = currentElement
+	}
+
+	// Set up ResolveCurrent to read from count scopes
+	scopes := childCtx.CountScopes
+	childCtx.ResolveCurrent = func(scopeName string) (any, bool) {
+		if scopeName == "" {
+			scopeName = "default"
+		}
+		v, ok := scopes[scopeName]
+		return v, ok
+	}
+
 	return &childCtx
+}
+
+// resolveNestedProperty resolves a dot-separated property path on a map.
+func resolveNestedProperty(obj map[string]any, path string) any {
+	parts := strings.Split(path, ".")
+	var current any = obj
+	for _, p := range parts {
+		m, ok := current.(map[string]any)
+		if !ok {
+			return nil
+		}
+		current, ok = m[p]
+		if !ok {
+			return nil
+		}
+	}
+	return current
 }
