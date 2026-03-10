@@ -14,6 +14,7 @@ import (
 	"github.com/matt-FFFFFF/goazurepolicyeng/condition"
 	"github.com/matt-FFFFFF/goazurepolicyeng/effect"
 	"github.com/matt-FFFFFF/goazurepolicyeng/result"
+	"github.com/matt-FFFFFF/goazurepolicyeng/scope"
 )
 
 // RelatedResourceFinder looks up related resources for AINE/DINE existence checks.
@@ -346,8 +347,16 @@ func (e *Engine) EvaluateAll(ctx context.Context, resource *Resource, assignment
 			continue
 		}
 
-		// Scope check: resource must be under assignment scope and not in notScopes
-		if !isInScope(resource.ID, a.Scope, a.NotScopes) {
+		// Applicability check: includes scope, notScopes, and any resource selectors.
+		scopeSelectors := make([]scope.ResourceSelector, len(a.ResourceSelectors))
+		for j, rs := range a.ResourceSelectors {
+			sels := make([]scope.SelectorExpression, len(rs.Selectors))
+			for k, s := range rs.Selectors {
+				sels[k] = scope.SelectorExpression{Kind: s.Kind, In: s.In, NotIn: s.NotIn}
+			}
+			scopeSelectors[j] = scope.ResourceSelector{Name: rs.Name, Selectors: sels}
+		}
+		if !scope.IsApplicable(a.Scope, a.NotScopes, scopeSelectors, resource.ID, resource.Location, resource.Type) {
 			continue
 		}
 
