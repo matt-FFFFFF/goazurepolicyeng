@@ -692,3 +692,499 @@ func TestEvaluateAll_InitiativeOnlySkippedWithoutSetDefs(t *testing.T) {
 	results := eng.EvaluateAll(context.Background(), resource, assignments, catalog)
 	assert.Len(t, results, 0)
 }
+
+func makeResourceFull(t *testing.T, id, typ, location, subID, rg, tenantID string) *Resource {
+	t.Helper()
+	raw := fmt.Sprintf(`{"id":%q,"type":%q,"location":%q,"name":"test"}`, id, typ, location)
+	return &Resource{
+		ID:             id,
+		Type:           typ,
+		Location:       location,
+		Name:           "test",
+		SubscriptionID: subID,
+		ResourceGroup:  rg,
+		TenantID:       tenantID,
+		Raw:            json.RawMessage(raw),
+	}
+}
+
+func TestEvaluate_SubscriptionExpression(t *testing.T) {
+	eng := makeEngine(t)
+	resource := makeResourceFull(t,
+		"/subscriptions/sub-123/resourceGroups/rg1/providers/Microsoft.Storage/storageAccounts/sa1",
+		"Microsoft.Storage/storageAccounts", "eastus", "sub-123", "rg1", "tenant-456")
+
+	// Policy that uses [subscription().subscriptionId] in a value condition
+	def := &PolicyDefinition{
+		ID: "policy-sub",
+		PolicyRule: json.RawMessage(`{
+			"if": {
+				"value": "[subscription().subscriptionId]",
+				"equals": "sub-123"
+			},
+			"then": {"effect": "audit"}
+		}`),
+	}
+	assignment := &Assignment{
+		ID:                 "assign-sub",
+		Scope:              "/subscriptions/sub-123",
+		PolicyDefinitionID: "policy-sub",
+	}
+
+	result := eng.Evaluate(context.Background(), EvaluateInput{
+		Definition: def,
+		Assignment: assignment,
+		Resource:   resource,
+	})
+
+	assert.Equal(t, NonCompliant, result.State)
+	assert.Equal(t, "audit", result.Effect)
+}
+
+func TestEvaluate_ResourceGroupExpression(t *testing.T) {
+	eng := makeEngine(t)
+	resource := makeResourceFull(t,
+		"/subscriptions/sub-123/resourceGroups/rg1/providers/Microsoft.Storage/storageAccounts/sa1",
+		"Microsoft.Storage/storageAccounts", "eastus", "sub-123", "rg1", "tenant-456")
+
+	def := &PolicyDefinition{
+		ID: "policy-rg",
+		PolicyRule: json.RawMessage(`{
+			"if": {
+				"value": "[resourceGroup().name]",
+				"equals": "rg1"
+			},
+			"then": {"effect": "audit"}
+		}`),
+	}
+	assignment := &Assignment{
+		ID:                 "assign-rg",
+		Scope:              "/subscriptions/sub-123",
+		PolicyDefinitionID: "policy-rg",
+	}
+
+	result := eng.Evaluate(context.Background(), EvaluateInput{
+		Definition: def,
+		Assignment: assignment,
+		Resource:   resource,
+	})
+
+	assert.Equal(t, NonCompliant, result.State)
+}
+
+func TestEvaluate_FieldExpression(t *testing.T) {
+	eng := makeEngine(t)
+	resource := makeResourceFull(t,
+		"/subscriptions/sub-123/resourceGroups/rg1/providers/Microsoft.Storage/storageAccounts/sa1",
+		"Microsoft.Storage/storageAccounts", "eastus", "sub-123", "rg1", "tenant-456")
+
+	// Use field() in a value condition (not a field condition)
+	def := &PolicyDefinition{
+		ID: "policy-field-expr",
+		PolicyRule: json.RawMessage(`{
+			"if": {
+				"value": "[field('location')]",
+				"equals": "eastus"
+			},
+			"then": {"effect": "audit"}
+		}`),
+	}
+	assignment := &Assignment{
+		ID:                 "assign-field-expr",
+		Scope:              "/subscriptions/sub-123",
+		PolicyDefinitionID: "policy-field-expr",
+	}
+
+	result := eng.Evaluate(context.Background(), EvaluateInput{
+		Definition: def,
+		Assignment: assignment,
+		Resource:   resource,
+	})
+
+	assert.Equal(t, NonCompliant, result.State)
+}
+
+func TestEvaluate_PolicyExpression(t *testing.T) {
+	eng := makeEngine(t)
+	resource := makeResourceFull(t,
+		"/subscriptions/sub-123/resourceGroups/rg1/providers/Microsoft.Storage/storageAccounts/sa1",
+		"Microsoft.Storage/storageAccounts", "eastus", "sub-123", "rg1", "tenant-456")
+
+	def := &PolicyDefinition{
+		ID: "policy-meta",
+		PolicyRule: json.RawMessage(`{
+			"if": {
+				"value": "[policy().assignmentId]",
+				"equals": "assign-meta"
+			},
+			"then": {"effect": "audit"}
+		}`),
+	}
+	assignment := &Assignment{
+		ID:                 "assign-meta",
+		Scope:              "/subscriptions/sub-123",
+		PolicyDefinitionID: "policy-meta",
+	}
+
+	result := eng.Evaluate(context.Background(), EvaluateInput{
+		Definition: def,
+		Assignment: assignment,
+		Resource:   resource,
+	})
+
+	assert.Equal(t, NonCompliant, result.State)
+}
+
+func TestEvaluate_InitiativePolicyScope(t *testing.T) {
+	eng := makeEngine(t)
+	resource := makeResourceFull(t,
+		"/subscriptions/sub-123/resourceGroups/rg1/providers/Microsoft.Storage/storageAccounts/sa1",
+		"Microsoft.Storage/storageAccounts", "eastus", "sub-123", "rg1", "tenant-456")
+
+	// Policy checks that setDefinitionId is populated
+	def := &PolicyDefinition{
+		ID: "policy-set-check",
+		PolicyRule: json.RawMessage(`{
+			"if": {
+				"value": "[policy().setDefinitionId]",
+				"equals": "initiative-1"
+			},
+			"then": {"effect": "audit"}
+		}`),
+	}
+
+	setDef := &PolicySetDefinition{
+		ID: "initiative-1",
+		PolicyDefinitions: []PolicyDefinitionReference{
+			{
+				PolicyDefinitionID:    "policy-set-check",
+				DefinitionReferenceID: "member-ref",
+			},
+		},
+	}
+
+	assignment := &Assignment{
+		ID:                 "assign-init",
+		Scope:              "/subscriptions/sub-123",
+		PolicyDefinitionID: "initiative-1",
+	}
+
+	definitions := map[string]*PolicyDefinition{"policy-set-check": def}
+	results := eng.EvaluateInitiative(context.Background(), resource, assignment, setDef, definitions)
+
+	require.Len(t, results, 1)
+	assert.Equal(t, NonCompliant, results[0].State)
+}
+
+func TestEvaluate_IpRangeContains(t *testing.T) {
+	eng := makeEngine(t)
+	resource := makeResourceFull(t,
+		"/subscriptions/sub-123/resourceGroups/rg1/providers/Microsoft.Network/nsg/nsg1",
+		"Microsoft.Network/networkSecurityGroups", "eastus", "sub-123", "rg1", "tenant-456")
+
+	def := &PolicyDefinition{
+		ID: "policy-ip",
+		Parameters: map[string]ParameterDefinition{
+			"testIP": {Type: "String", DefaultValue: "10.1.2.3"},
+		},
+		PolicyRule: json.RawMessage(`{
+			"if": {
+				"value": "[ipRangeContains('10.0.0.0/8', parameters('testIP'))]",
+				"equals": true
+			},
+			"then": {"effect": "audit"}
+		}`),
+	}
+	assignment := &Assignment{
+		ID:                 "assign-ip",
+		Scope:              "/subscriptions/sub-123",
+		PolicyDefinitionID: "policy-ip",
+	}
+
+	result := eng.Evaluate(context.Background(), EvaluateInput{
+		Definition: def,
+		Assignment: assignment,
+		Resource:   resource,
+	})
+
+	assert.Equal(t, NonCompliant, result.State)
+}
+
+func TestEvaluate_AddDays(t *testing.T) {
+	eng := makeEngine(t)
+	resource := makeResourceFull(t,
+		"/subscriptions/sub-123/resourceGroups/rg1/providers/Microsoft.Storage/storageAccounts/sa1",
+		"Microsoft.Storage/storageAccounts", "eastus", "sub-123", "rg1", "tenant-456")
+
+	def := &PolicyDefinition{
+		ID: "policy-adddays",
+		Parameters: map[string]ParameterDefinition{
+			"baseDate": {Type: "String", DefaultValue: "2025-01-01T00:00:00Z"},
+		},
+		PolicyRule: json.RawMessage(`{
+			"if": {
+				"value": "[addDays(parameters('baseDate'), 30)]",
+				"equals": "2025-01-31T00:00:00Z"
+			},
+			"then": {"effect": "audit"}
+		}`),
+	}
+	assignment := &Assignment{
+		ID:                 "assign-adddays",
+		Scope:              "/subscriptions/sub-123",
+		PolicyDefinitionID: "policy-adddays",
+	}
+
+	result := eng.Evaluate(context.Background(), EvaluateInput{
+		Definition: def,
+		Assignment: assignment,
+		Resource:   resource,
+	})
+
+	assert.Equal(t, NonCompliant, result.State)
+}
+
+func TestEvaluate_ParametersInValueCondition(t *testing.T) {
+	eng := makeEngine(t)
+	resource := makeResourceFull(t,
+		"/subscriptions/sub-123/resourceGroups/rg1/providers/Microsoft.Storage/storageAccounts/sa1",
+		"Microsoft.Storage/storageAccounts", "eastus", "sub-123", "rg1", "tenant-456")
+
+	def := &PolicyDefinition{
+		ID: "policy-param-value",
+		Parameters: map[string]ParameterDefinition{
+			"allowedLocation": {Type: "String", DefaultValue: "westus"},
+		},
+		PolicyRule: json.RawMessage(`{
+			"if": {
+				"value": "[parameters('allowedLocation')]",
+				"equals": "eastus"
+			},
+			"then": {"effect": "audit"}
+		}`),
+	}
+	assignment := &Assignment{
+		ID:                 "assign-param-value",
+		Scope:              "/subscriptions/sub-123",
+		PolicyDefinitionID: "policy-param-value",
+		Parameters: map[string]ParameterValue{
+			"allowedLocation": {Value: "eastus"},
+		},
+	}
+
+	result := eng.Evaluate(context.Background(), EvaluateInput{
+		Definition: def,
+		Assignment: assignment,
+		Resource:   resource,
+	})
+
+	assert.Equal(t, NonCompliant, result.State, "parameters('allowedLocation') should resolve to 'eastus'")
+}
+
+func TestEvaluate_CurrentInCountWhere(t *testing.T) {
+	eng := makeEngine(t)
+
+	// Resource with tags array-like structure to count over
+	raw := `{"id":"/subscriptions/sub-123/resourceGroups/rg1/providers/Microsoft.Network/nsg/nsg1","type":"Microsoft.Network/networkSecurityGroups","location":"eastus","properties":{"securityRules":["rule1","rule2","rule3"]}}`
+	resource := &Resource{
+		ID:             "/subscriptions/sub-123/resourceGroups/rg1/providers/Microsoft.Network/nsg/nsg1",
+		Type:           "Microsoft.Network/networkSecurityGroups",
+		Location:       "eastus",
+		SubscriptionID: "sub-123",
+		ResourceGroup:  "rg1",
+		TenantID:       "tenant-456",
+		Raw:            json.RawMessage(raw),
+	}
+
+	// Use a value count with current() in the where clause
+	def := &PolicyDefinition{
+		ID: "policy-current",
+		Parameters: map[string]ParameterDefinition{
+			"items": {Type: "Array", DefaultValue: []any{"a", "b", "c"}},
+		},
+		PolicyRule: json.RawMessage(`{
+			"if": {
+				"count": {
+					"value": "[parameters('items')]",
+					"where": {
+						"value": "[current()]",
+						"equals": "b"
+					}
+				},
+				"greater": 0
+			},
+			"then": {"effect": "audit"}
+		}`),
+	}
+	assignment := &Assignment{
+		ID:                 "assign-current",
+		Scope:              "/subscriptions/sub-123",
+		PolicyDefinitionID: "policy-current",
+	}
+
+	result := eng.Evaluate(context.Background(), EvaluateInput{
+		Definition: def,
+		Assignment: assignment,
+		Resource:   resource,
+	})
+
+	// Count of items where current() == "b" should be 1, which is > 0
+	assert.Equal(t, NonCompliant, result.State, "current() should resolve in count where clause")
+}
+
+func TestEvaluateBulk_UsesTieredScopeChain(t *testing.T) {
+	eng := makeEngine(t)
+
+	// Policy that uses subscription().subscriptionId — only works with tiered scope chain
+	def := &PolicyDefinition{
+		ID: "policy-sub-bulk",
+		PolicyRule: json.RawMessage(`{
+			"if": {
+				"value": "[subscription().subscriptionId]",
+				"equals": "sub-123"
+			},
+			"then": {"effect": "audit"}
+		}`),
+	}
+	definitions := map[string]*PolicyDefinition{"policy-sub-bulk": def}
+	assignments := []Assignment{{
+		ID:                 "assign-bulk",
+		Scope:              "/subscriptions/sub-123",
+		PolicyDefinitionID: "policy-sub-bulk",
+	}}
+
+	resources := make([]Resource, 5)
+	for i := range resources {
+		id := fmt.Sprintf("/subscriptions/sub-123/resourceGroups/rg1/providers/Microsoft.Storage/storageAccounts/sa%d", i)
+		raw := fmt.Sprintf(`{"id":%q,"type":"Microsoft.Storage/storageAccounts","location":"eastus"}`, id)
+		resources[i] = Resource{
+			ID:             id,
+			Type:           "Microsoft.Storage/storageAccounts",
+			Location:       "eastus",
+			SubscriptionID: "sub-123",
+			ResourceGroup:  "rg1",
+			TenantID:       "tenant-456",
+			Raw:            json.RawMessage(raw),
+		}
+	}
+
+	results := eng.EvaluateBulk(context.Background(), resources, assignments, Catalog{Definitions: definitions}, 2)
+
+	assert.Len(t, results, 5, "should have results for all 5 resources")
+	for id, res := range results {
+		require.Len(t, res, 1, "resource %s should have 1 result", id)
+		assert.Equal(t, NonCompliant, res[0].State, "resource %s should be NonCompliant via subscription() expression", id)
+	}
+}
+
+func TestEvaluateAll_UsesTieredScopeChain(t *testing.T) {
+	eng := makeEngine(t)
+
+	// Policy that uses resourceGroup().name — only works with tiered scope chain
+	def := &PolicyDefinition{
+		ID: "policy-rg-all",
+		PolicyRule: json.RawMessage(`{
+			"if": {
+				"value": "[resourceGroup().name]",
+				"equals": "rg1"
+			},
+			"then": {"effect": "audit"}
+		}`),
+	}
+	definitions := map[string]*PolicyDefinition{"policy-rg-all": def}
+	assignments := []Assignment{{
+		ID:                 "assign-rg-all",
+		Scope:              "/subscriptions/sub-123",
+		PolicyDefinitionID: "policy-rg-all",
+	}}
+
+	resource := makeResourceFull(t,
+		"/subscriptions/sub-123/resourceGroups/rg1/providers/Microsoft.Storage/storageAccounts/sa1",
+		"Microsoft.Storage/storageAccounts", "eastus", "sub-123", "rg1", "tenant-456")
+
+	results := eng.EvaluateAll(context.Background(), resource, assignments, Catalog{Definitions: definitions})
+
+	require.Len(t, results, 1)
+	assert.Equal(t, NonCompliant, results[0].State, "resourceGroup().name should work through EvaluateAll")
+}
+
+func TestEvaluate_InitiativeDefinitionReferenceID(t *testing.T) {
+	eng := makeEngine(t)
+	resource := makeResourceFull(t,
+		"/subscriptions/sub-123/resourceGroups/rg1/providers/Microsoft.Storage/storageAccounts/sa1",
+		"Microsoft.Storage/storageAccounts", "eastus", "sub-123", "rg1", "tenant-456")
+
+	// Policy checks that definitionReferenceId is populated from initiative
+	def := &PolicyDefinition{
+		ID: "policy-defref",
+		PolicyRule: json.RawMessage(`{
+			"if": {
+				"value": "[policy().definitionReferenceId]",
+				"equals": "storage-ref-1"
+			},
+			"then": {"effect": "audit"}
+		}`),
+	}
+
+	setDef := &PolicySetDefinition{
+		ID: "initiative-defref",
+		PolicyDefinitions: []PolicyDefinitionReference{
+			{
+				PolicyDefinitionID:    "policy-defref",
+				DefinitionReferenceID: "storage-ref-1",
+			},
+		},
+	}
+
+	assignment := &Assignment{
+		ID:                 "assign-defref",
+		Scope:              "/subscriptions/sub-123",
+		PolicyDefinitionID: "initiative-defref",
+	}
+
+	definitions := map[string]*PolicyDefinition{"policy-defref": def}
+	results := eng.EvaluateInitiative(context.Background(), resource, assignment, setDef, definitions)
+
+	require.Len(t, results, 1)
+	assert.Equal(t, NonCompliant, results[0].State, "definitionReferenceId should be populated from initiative")
+}
+
+func TestEvaluate_RequestContext(t *testing.T) {
+	resource := &Resource{
+		ID:             "/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.Compute/virtualMachines/vm-1",
+		Type:           "Microsoft.Compute/virtualMachines",
+		Location:       "eastus",
+		SubscriptionID: "sub-1",
+		ResourceGroup:  "rg-1",
+		Raw:            json.RawMessage(`{"type":"Microsoft.Compute/virtualMachines","location":"eastus"}`),
+	}
+	// Policy: value "[requestContext().apiVersion]" equals "" → should match since apiVersion is empty stub
+	def := &PolicyDefinition{
+		ID: "test-requestcontext",
+		PolicyRule: json.RawMessage(`{
+			"if": {
+				"value": "[requestContext().apiVersion]",
+				"equals": ""
+			},
+			"then": { "effect": "audit" }
+		}`),
+	}
+	assignment := &Assignment{
+		ID:                 "assign-rc",
+		Scope:              "/subscriptions/sub-1",
+		PolicyDefinitionID: "test-requestcontext",
+	}
+
+	eng := New(nil, WithFieldResolvers(
+		func(j string, f string) (any, error) { return gjsonGet(j, f), nil },
+		func(j string, f string) ([]any, error) { return nil, nil },
+	))
+	result := eng.Evaluate(context.Background(), EvaluateInput{
+		Definition: def,
+		Assignment: assignment,
+		Resource:   resource,
+	})
+
+	assert.Equal(t, NonCompliant, result.State, "requestContext().apiVersion should be empty string, matching equals ''")
+}
+
