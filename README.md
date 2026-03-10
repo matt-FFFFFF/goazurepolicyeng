@@ -118,7 +118,7 @@ result := engine.Evaluate(ctx, goazurepolicyeng.EvaluateInput{
 ```go
 catalog := goazurepolicyeng.Catalog{
 	Definitions:    definitions,
-	SetDefinitions: setDefinitions, // optional, for initiative support
+	SetDefinitions: nil, // optional, for initiative support
 }
 results := engine.EvaluateAll(ctx, resource, assignments, catalog)
 ```

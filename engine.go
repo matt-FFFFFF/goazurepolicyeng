@@ -344,7 +344,8 @@ type Catalog struct {
 	SetDefinitions map[string]*PolicySetDefinition
 }
 
-// isApplicable checks scope, notScopes, and resource selectors for an assignment.
+// isAssignmentApplicable checks whether an assignment applies to a resource,
+// based on its scope, notScopes, and any resource selectors.
 func isAssignmentApplicable(a *Assignment, resource *Resource) bool {
 	scopeSelectors := make([]scope.ResourceSelector, len(a.ResourceSelectors))
 	for j, rs := range a.ResourceSelectors {
