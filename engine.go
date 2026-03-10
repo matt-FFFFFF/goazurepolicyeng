@@ -217,11 +217,9 @@ func (e *Engine) evalExpression(ctx context.Context, expr string, assignmentPara
 	for k, v := range assignmentParams {
 		paramScope[k] = v.Value
 	}
-	if defParams != nil {
-		for k, def := range defParams {
-			if _, ok := paramScope[k]; !ok && def.DefaultValue != nil {
-				paramScope[k] = def.DefaultValue
-			}
+	for k, def := range defParams {
+		if _, ok := paramScope[k]; !ok && def.DefaultValue != nil {
+			paramScope[k] = def.DefaultValue
 		}
 	}
 
@@ -328,11 +326,9 @@ func mergeParameters(assigned map[string]ParameterValue, defined map[string]Para
 	for k, v := range assigned {
 		merged[k] = v
 	}
-	if defined != nil {
-		for k, def := range defined {
-			if _, ok := merged[k]; !ok && def.DefaultValue != nil {
-				merged[k] = ParameterValue{Value: def.DefaultValue}
-			}
+	for k, def := range defined {
+		if _, ok := merged[k]; !ok && def.DefaultValue != nil {
+			merged[k] = ParameterValue{Value: def.DefaultValue}
 		}
 	}
 	return merged
@@ -432,10 +428,11 @@ func (e *Engine) EvaluateBulk(ctx context.Context, resources []Resource, assignm
 	}
 
 	// Feed jobs to the workers.
+feedLoop:
 	for i := range resources {
 		select {
 		case <-ctx.Done():
-			break
+			break feedLoop
 		case jobs <- &resources[i]:
 		}
 	}

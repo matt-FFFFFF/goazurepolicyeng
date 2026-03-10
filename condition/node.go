@@ -53,7 +53,7 @@ func (a *AllOf) Evaluate(ctx *EvalContext) (bool, error) {
 	if ctx.Tracing {
 		start = time.Now()
 	}
-	var res bool = true
+	res := true
 	for _, c := range a.Conditions {
 		r, err := c.Evaluate(ctx.child())
 		if err != nil {

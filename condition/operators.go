@@ -125,7 +125,7 @@ func matchPattern(s, pattern string, caseSensitive bool) bool {
 				return false
 			}
 		case '?':
-			if !((sc >= 'a' && sc <= 'z') || (sc >= 'A' && sc <= 'Z')) {
+			if (sc < 'a' || sc > 'z') && (sc < 'A' || sc > 'Z') {
 				return false
 			}
 		case '.':
