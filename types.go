@@ -88,6 +88,7 @@ type Assignment struct {
 	EnforcementMode    string                    `json:"enforcementMode"` // Default, DoNotEnforce
 	ResourceSelectors  []ResourceSelector        `json:"resourceSelectors"`
 	Overrides          []Override                `json:"overrides"`
+	EffectOverride     string                    `json:"-"` // Set by initiative evaluation to override effect
 }
 
 // ResourceSelector filters which resources an assignment applies to.
