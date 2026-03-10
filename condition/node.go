@@ -40,6 +40,23 @@ type EvalContext struct {
 	depth          int             // current evaluation depth for trace indentation
 }
 
+// Reset clears all fields so the EvalContext can be returned to a sync.Pool.
+// Slice and map fields are nilled to avoid retaining stale references.
+func (ctx *EvalContext) Reset() {
+	ctx.ResourceJSON = ""
+	ctx.ResolveField = nil
+	ctx.ResolveFieldArray = nil
+	ctx.Operators = nil
+	ctx.EvalExpression = nil
+	ctx.CountScopes = nil
+	ctx.ResolveCurrent = nil
+	ctx.EvalExpressionWithCurrent = nil
+	ctx.Tracing = false
+	ctx.Trace = nil
+	ctx.Reasons = nil // nil rather than reslice; callers may hold the old slice
+	ctx.depth = 0
+}
+
 // child returns a shallow copy of EvalContext with incremented depth.
 func (ctx *EvalContext) child() *EvalContext {
 	c := *ctx

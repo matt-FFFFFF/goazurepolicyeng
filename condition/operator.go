@@ -1,6 +1,9 @@
 package condition
 
-import "strings"
+import (
+	"strings"
+	"sync"
+)
 
 // Operator evaluates a comparison between a field/value and a condition operand.
 type Operator interface {
@@ -33,8 +36,21 @@ func (r *OperatorRegistry) Get(name string) (Operator, bool) {
 	return op, ok
 }
 
-// DefaultOperatorRegistry returns a registry with all Azure Policy operators.
+var (
+	defaultOperatorRegistryOnce sync.Once
+	defaultOperatorRegistry     *OperatorRegistry
+)
+
+// DefaultOperatorRegistry returns a shared, read-only registry with all Azure Policy operators.
+// The registry is created once and reused across all callers.
 func DefaultOperatorRegistry() *OperatorRegistry {
+	defaultOperatorRegistryOnce.Do(func() {
+		defaultOperatorRegistry = newDefaultOperatorRegistry()
+	})
+	return defaultOperatorRegistry
+}
+
+func newDefaultOperatorRegistry() *OperatorRegistry {
 	r := NewOperatorRegistry()
 	r.Register("equals", OperatorFunc(opEquals))
 	r.Register("notEquals", OperatorFunc(opNotEquals))
