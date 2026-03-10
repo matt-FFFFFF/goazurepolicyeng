@@ -3,6 +3,17 @@ package scope
 
 import "strings"
 
+// hasScopePrefix checks if id starts with scope at a path-segment boundary.
+func hasScopePrefix(id, scope string) bool {
+	if !strings.HasPrefix(id, scope) {
+		return false
+	}
+	if len(id) == len(scope) {
+		return true
+	}
+	return id[len(scope)] == '/'
+}
+
 // ResourceSelector mirrors the root package type to avoid circular imports.
 type ResourceSelector struct {
 	Name      string
@@ -36,14 +47,14 @@ func IsApplicable(
 ) bool {
 	lowerResID := strings.ToLower(resourceID)
 
-	// 1. Scope check: resource ID must start with assignment scope
-	if !strings.HasPrefix(lowerResID, strings.ToLower(assignmentScope)) {
+	// 1. Scope check: resource ID must start with assignment scope at a path boundary
+	if !hasScopePrefix(lowerResID, strings.ToLower(assignmentScope)) {
 		return false
 	}
 
 	// 2. NotScopes: resource ID must NOT start with any notScope
 	for _, ns := range notScopes {
-		if strings.HasPrefix(lowerResID, strings.ToLower(ns)) {
+		if hasScopePrefix(lowerResID, strings.ToLower(ns)) {
 			return false
 		}
 	}
@@ -134,11 +145,11 @@ func containsLower(slice []string, target string) bool {
 // Returns the overridden effect and true if found, or empty string and false.
 func ResolveOverride(overrides []Override, definitionReferenceID string) (string, bool) {
 	for _, o := range overrides {
-		if o.Kind != "policyEffect" {
+		if !strings.EqualFold(o.Kind, "policyEffect") {
 			continue
 		}
 		for _, s := range o.Selectors {
-			if s.Kind == "policyDefinitionReferenceId" {
+			if strings.EqualFold(s.Kind, "policyDefinitionReferenceId") {
 				if matchesInNotIn(definitionReferenceID, s.In, s.NotIn) {
 					return o.Value, true
 				}

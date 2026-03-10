@@ -66,6 +66,10 @@ func CheckExistence(
 		return len(resources) > 0, nil
 	}
 
+	if conditionEvaluator == nil {
+		return false, fmt.Errorf("existence condition is set but no conditionEvaluator provided")
+	}
+
 	// Evaluate existenceCondition against each resource.
 	for _, r := range resources {
 		matched, err := conditionEvaluator(r.JSON)

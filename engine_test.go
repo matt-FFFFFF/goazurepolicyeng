@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -482,10 +481,6 @@ func TestEvaluateInitiative_Override(t *testing.T) {
 }
 
 func TestEvaluateBulk_WorkerCount(t *testing.T) {
-	// Verify that worker count limits concurrency
-	var maxConcurrent int64
-	var current int64
-
 	eng := makeEngine(t)
 
 	def := &PolicyDefinition{
@@ -504,9 +499,6 @@ func TestEvaluateBulk_WorkerCount(t *testing.T) {
 
 	results := eng.EvaluateBulk(context.Background(), resources, assignments, definitions, 2)
 	assert.Len(t, results, 20)
-	_ = maxConcurrent
-	_ = current
-	_ = atomic.AddInt64
 }
 
 func TestEvaluate_WithTracing(t *testing.T) {

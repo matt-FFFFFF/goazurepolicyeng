@@ -204,6 +204,14 @@ func parseCountCondition(countRaw json.RawMessage, op string, operand any) (cond
 		c.Name = name
 	}
 
+	// Validate that exactly one of field or value is set
+	if c.Field == "" && c.ValueExpr == "" {
+		return nil, fmt.Errorf("count condition must specify either 'field' or 'value'")
+	}
+	if c.Field != "" && c.ValueExpr != "" {
+		return nil, fmt.Errorf("count condition must specify either 'field' or 'value', not both")
+	}
+
 	if whereRaw, ok := countObj["where"]; ok {
 		where, err := parseCondition(whereRaw)
 		if err != nil {

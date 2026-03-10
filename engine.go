@@ -13,7 +13,6 @@ import (
 	"github.com/matt-FFFFFF/goarmfunctions/armparser"
 	"github.com/matt-FFFFFF/goazurepolicyeng/condition"
 	"github.com/matt-FFFFFF/goazurepolicyeng/effect"
-	effectpkg "github.com/matt-FFFFFF/goazurepolicyeng/effect"
 	"github.com/matt-FFFFFF/goazurepolicyeng/result"
 )
 
@@ -259,7 +258,7 @@ func (e *Engine) checkExistence(ctx context.Context, parsed *ParsedRule, resourc
 		return false, fmt.Errorf("AINE/DINE policy missing 'details' in 'then'")
 	}
 
-	var details effectpkg.ExistenceDetails
+	var details effect.ExistenceDetails
 	if err := json.Unmarshal(detailsRaw, &details); err != nil {
 		return false, fmt.Errorf("unmarshal existence details: %w", err)
 	}
@@ -273,20 +272,26 @@ func (e *Engine) checkExistence(ctx context.Context, parsed *ParsedRule, resourc
 	// Convert RelatedResourceFinder to effect.ResourceFinder
 	finder := &relatedFinderAdapter{e.related}
 
-	condEvaluator := func(resourceJSON string) (bool, error) {
-		if len(details.ExistenceCondition) == 0 {
-			return true, nil
-		}
+	// Parse the existence condition once and reuse.
+	var compiledCond condition.Node
+	if len(details.ExistenceCondition) != 0 {
 		cond, err := parseCondition(details.ExistenceCondition)
 		if err != nil {
 			return false, err
 		}
-		tempResource := &Resource{Raw: json.RawMessage(resourceJSON)}
-		evalCtx := e.buildEvalContext(ctx, tempResource, assignment, def)
-		return cond.Evaluate(evalCtx)
+		compiledCond = cond
 	}
 
-	return effectpkg.CheckExistence(ctx, details, resourceScope, finder, condEvaluator)
+	condEvaluator := func(resourceJSON string) (bool, error) {
+		if compiledCond == nil {
+			return true, nil
+		}
+		tempResource := &Resource{Raw: json.RawMessage(resourceJSON)}
+		evalCtx := e.buildEvalContext(ctx, tempResource, assignment, def)
+		return compiledCond.Evaluate(evalCtx)
+	}
+
+	return effect.CheckExistence(ctx, details, resourceScope, finder, condEvaluator)
 }
 
 // relatedFinderAdapter adapts RelatedResourceFinder to effect.ResourceFinder.
@@ -294,7 +299,7 @@ type relatedFinderAdapter struct {
 	inner RelatedResourceFinder
 }
 
-func (a *relatedFinderAdapter) Find(ctx context.Context, query effectpkg.ResourceQuery) ([]effectpkg.Resource, error) {
+func (a *relatedFinderAdapter) Find(ctx context.Context, query effect.ResourceQuery) ([]effect.Resource, error) {
 	results, err := a.inner.Find(ctx, RelatedResourceQuery{
 		ResourceType: query.ResourceType,
 		Scope:        query.Scope,
@@ -303,9 +308,9 @@ func (a *relatedFinderAdapter) Find(ctx context.Context, query effectpkg.Resourc
 	if err != nil {
 		return nil, err
 	}
-	out := make([]effectpkg.Resource, len(results))
+	out := make([]effect.Resource, len(results))
 	for i, r := range results {
-		out[i] = effectpkg.Resource{JSON: string(r.Raw)}
+		out[i] = effect.Resource{JSON: string(r.Raw)}
 	}
 	return out, nil
 }
@@ -368,22 +373,40 @@ func (e *Engine) EvaluateBulk(ctx context.Context, resources []Resource, assignm
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 
-	sem := make(chan struct{}, workers)
+	jobs := make(chan *Resource)
 
-	for i := range resources {
+	// Start worker goroutines.
+	for i := 0; i < workers; i++ {
 		wg.Add(1)
-		go func(r *Resource) {
+		go func() {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case r, ok := <-jobs:
+					if !ok {
+						return
+					}
+					res := e.EvaluateAll(ctx, r, assignments, definitions)
 
-			res := e.EvaluateAll(ctx, r, assignments, definitions)
-
-			mu.Lock()
-			results[r.ID] = res
-			mu.Unlock()
-		}(&resources[i])
+					mu.Lock()
+					results[r.ID] = res
+					mu.Unlock()
+				}
+			}
+		}()
 	}
+
+	// Feed jobs to the workers.
+	for i := range resources {
+		select {
+		case <-ctx.Done():
+			break
+		case jobs <- &resources[i]:
+		}
+	}
+	close(jobs)
 
 	wg.Wait()
 	return results
@@ -470,17 +493,28 @@ func extractParameterName(expr string) string {
 	return ""
 }
 
+// hasScopePrefix checks if id starts with scope at a path-segment boundary.
+func hasScopePrefix(id, scope string) bool {
+	if !strings.HasPrefix(id, scope) {
+		return false
+	}
+	if len(id) == len(scope) {
+		return true
+	}
+	return id[len(scope)] == '/'
+}
+
 // isInScope checks if a resource ID falls under the assignment scope and is not excluded.
 func isInScope(resourceID, assignmentScope string, notScopes []string) bool {
 	lowerID := strings.ToLower(resourceID)
 	lowerScope := strings.ToLower(assignmentScope)
 
-	if !strings.HasPrefix(lowerID, lowerScope) {
+	if !hasScopePrefix(lowerID, lowerScope) {
 		return false
 	}
 
 	for _, ns := range notScopes {
-		if strings.HasPrefix(lowerID, strings.ToLower(ns)) {
+		if hasScopePrefix(lowerID, strings.ToLower(ns)) {
 			return false
 		}
 	}
@@ -495,14 +529,15 @@ func matchesOverrideSelectors(selectors []SelectorExpression, defRefID string) b
 	}
 	for _, sel := range selectors {
 		if strings.EqualFold(sel.Kind, "policyDefinitionReferenceId") {
-			for _, id := range sel.In {
-				if strings.EqualFold(id, defRefID) {
-					return true
-				}
-			}
+			// Check NotIn first so exclusions take precedence
 			for _, id := range sel.NotIn {
 				if strings.EqualFold(id, defRefID) {
 					return false
+				}
+			}
+			for _, id := range sel.In {
+				if strings.EqualFold(id, defRefID) {
+					return true
 				}
 			}
 		}

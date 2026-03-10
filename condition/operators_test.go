@@ -129,7 +129,7 @@ func TestMatchInsensitively(t *testing.T) {
 	if !got {
 		t.Error("matchInsensitively should be case-insensitive for literals")
 	}
-	got, _ = opMatchInsensitively("A1c", "?#?", )
+	got, _ = opMatchInsensitively("A1c", "?#?")
 	if !got {
 		t.Error("matchInsensitively should match letter-digit-letter")
 	}
