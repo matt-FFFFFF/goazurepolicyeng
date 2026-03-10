@@ -36,6 +36,13 @@ func NewTrace() *Trace {
 	return &Trace{Steps: make([]TraceStep, 0, 16)}
 }
 
+// Reset clears the trace steps while retaining the underlying capacity.
+func (t *Trace) Reset() {
+	if t != nil {
+		t.Steps = t.Steps[:0]
+	}
+}
+
 // Record adds a step to the trace.
 func (t *Trace) Record(step TraceStep) {
 	if t != nil {

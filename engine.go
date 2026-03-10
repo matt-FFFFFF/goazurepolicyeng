@@ -52,6 +52,19 @@ type Engine struct {
 	resolveField      FieldResolverFunc
 	resolveFieldArray FieldArrayResolverFunc
 	tracing           bool
+
+	// parsedRuleCache caches parsed policy rules by definition ID to avoid
+	// re-parsing the same policy rule for every resource in bulk evaluation.
+	parsedRuleCache sync.Map // map[string]*ParsedRule
+
+	// baseRegistry is a cached base ARM function registry. buildPolicyRegistry
+	// clones from this instead of creating a new DefaultRegistry() each time.
+	baseRegistryOnce sync.Once
+	baseRegistry     *armparser.FuncRegistry
+
+	// evalCtxPool reduces allocation pressure in bulk evaluation by reusing
+	// EvalContext structs. Callers must call releaseEvalContext when done.
+	evalCtxPool sync.Pool
 }
 
 // Option configures the Engine.
@@ -84,6 +97,23 @@ func New(aliases AliasResolver, opts ...Option) *Engine {
 	return e
 }
 
+// getParsedRule returns a cached ParsedRule for the definition, parsing on first access.
+func (e *Engine) getParsedRule(def *PolicyDefinition) (*ParsedRule, error) {
+	if def.ID != "" {
+		if cached, ok := e.parsedRuleCache.Load(def.ID); ok {
+			return cached.(*ParsedRule), nil
+		}
+	}
+	parsed, err := ParsePolicyRule(def.PolicyRule)
+	if err != nil {
+		return nil, err
+	}
+	if def.ID != "" {
+		e.parsedRuleCache.Store(def.ID, parsed)
+	}
+	return parsed, nil
+}
+
 // EvaluateInput bundles everything needed to evaluate one policy against one resource.
 type EvaluateInput struct {
 	Definition *PolicyDefinition
@@ -111,8 +141,8 @@ func (e *Engine) Evaluate(ctx context.Context, input EvaluateInput) EvaluationRe
 	assignment := input.Assignment
 	resource := input.Resource
 
-	// 1. Parse the policy rule
-	parsed, err := ParsePolicyRule(def.PolicyRule)
+	// 1. Parse the policy rule (cached by definition ID)
+	parsed, err := e.getParsedRule(def)
 	if err != nil {
 		return EvaluationResult{State: Error, Errors: []error{err}}
 	}
@@ -145,6 +175,7 @@ func (e *Engine) Evaluate(ctx context.Context, input EvaluateInput) EvaluationRe
 
 	// 4. Build EvalContext (with initiative context if present)
 	evalCtx := e.buildEvalContextWithInitiative(ctx, resource, assignment, def, input.SetDefinitionID, input.DefinitionReferenceID)
+	defer e.releaseEvalContext(evalCtx)
 
 	// 5. Evaluate the if-condition
 	matched, err := parsed.Condition.Evaluate(evalCtx)
@@ -192,6 +223,20 @@ func (e *Engine) buildEvalContext(ctx context.Context, resource *Resource, assig
 	return e.buildEvalContextWithInitiative(ctx, resource, assignment, def, "", "")
 }
 
+// acquireEvalContext gets an EvalContext from the pool or creates a new one.
+func (e *Engine) acquireEvalContext() *condition.EvalContext {
+	if v := e.evalCtxPool.Get(); v != nil {
+		return v.(*condition.EvalContext)
+	}
+	return &condition.EvalContext{}
+}
+
+// releaseEvalContext returns an EvalContext to the pool after resetting it.
+func (e *Engine) releaseEvalContext(ctx *condition.EvalContext) {
+	ctx.Reset()
+	e.evalCtxPool.Put(ctx)
+}
+
 // buildEvalContextWithInitiative creates a condition.EvalContext with optional initiative context.
 func (e *Engine) buildEvalContextWithInitiative(ctx context.Context, resource *Resource, assignment *Assignment, def *PolicyDefinition, setDefinitionID, definitionReferenceID string) *condition.EvalContext {
 	params := mergeParameters(assignment.Parameters, def.Parameters)
@@ -200,24 +245,23 @@ func (e *Engine) buildEvalContextWithInitiative(ctx context.Context, resource *R
 	armCtx := e.buildScopeChain(resource, assignment, def, params, setDefinitionID, definitionReferenceID)
 	registry := e.buildPolicyRegistry(resource, armCtx)
 
-	evalCtx := &condition.EvalContext{
-		ResourceJSON: string(resource.Raw),
-		ResolveField: func(json string, field string) (any, error) {
-			if e.resolveField != nil {
-				return e.resolveField(json, field)
-			}
-			return nil, fmt.Errorf("no field resolver configured")
-		},
-		ResolveFieldArray: func(json string, field string) ([]any, error) {
-			if e.resolveFieldArray != nil {
-				return e.resolveFieldArray(json, field)
-			}
-			return nil, fmt.Errorf("no field array resolver configured")
-		},
-		Operators:   condition.DefaultOperatorRegistry(),
-		CountScopes: nil,
-		Tracing:     e.tracing,
+	evalCtx := e.acquireEvalContext()
+	evalCtx.ResourceJSON = string(resource.Raw)
+	evalCtx.ResolveField = func(json string, field string) (any, error) {
+		if e.resolveField != nil {
+			return e.resolveField(json, field)
+		}
+		return nil, fmt.Errorf("no field resolver configured")
 	}
+	evalCtx.ResolveFieldArray = func(json string, field string) ([]any, error) {
+		if e.resolveFieldArray != nil {
+			return e.resolveFieldArray(json, field)
+		}
+		return nil, fmt.Errorf("no field array resolver configured")
+	}
+	evalCtx.Operators = condition.DefaultOperatorRegistry()
+	evalCtx.CountScopes = nil
+	evalCtx.Tracing = e.tracing
 
 	// Assign EvalExpression after creation so the closure can capture evalCtx pointer.
 	evalCtx.EvalExpression = func(expr string) (any, error) {
@@ -269,9 +313,17 @@ func (e *Engine) buildScopeChain(resource *Resource, assignment *Assignment, def
 	return policyScope
 }
 
+// getBaseRegistry returns a cached base ARM function registry.
+func (e *Engine) getBaseRegistry() *armparser.FuncRegistry {
+	e.baseRegistryOnce.Do(func() {
+		e.baseRegistry = armparser.DefaultRegistry()
+	})
+	return e.baseRegistry
+}
+
 // buildPolicyRegistry creates a function registry with policy-specific functions.
 func (e *Engine) buildPolicyRegistry(resource *Resource, armCtx armparser.EvalContext) *armparser.FuncRegistry {
-	registry := armparser.DefaultRegistry()
+	registry := e.getBaseRegistry().Clone()
 
 	// field(aliasName) — resolve a field from the resource
 	registry.Register("field", func(ctx context.Context, call *armparser.FunctionCall, evalCtx armparser.EvalContext) (any, error) {
@@ -519,6 +571,7 @@ func (e *Engine) checkExistence(ctx context.Context, parsed *ParsedRule, resourc
 		}
 		tempResource := &Resource{Raw: json.RawMessage(resourceJSON)}
 		evalCtx := e.buildEvalContext(ctx, tempResource, assignment, def)
+		defer e.releaseEvalContext(evalCtx)
 		return compiledCond.Evaluate(evalCtx)
 	}
 
