@@ -19,6 +19,27 @@ import (
 	"github.com/matt-FFFFFF/goazurepolicyeng/scope"
 )
 
+// DefaultParseCacheSize is the default number of parsed ARM expression ASTs
+// cached by the underlying goarmfunctions evaluator. Repeated evaluations of
+// the same expression string (e.g. "[parameters('effect')]") reuse the cached
+// parse tree instead of re-parsing, which is substantially faster in bulk
+// evaluation scenarios.
+const DefaultParseCacheSize = goarmfunctions.DefaultParseCacheSize
+
+// SetParseCacheSize configures the maximum number of parsed expression ASTs
+// held in the global LRU cache. Setting size to 0 disables caching (every
+// expression is parsed fresh). The cache is shared across all Engine instances.
+func SetParseCacheSize(size int) { goarmfunctions.SetParseCacheSize(size) }
+
+// ResetParseCache clears all cached parse results. This is useful in tests or
+// after a bulk evaluation pass where the working set of expressions changes
+// completely.
+func ResetParseCache() { goarmfunctions.ResetParseCache() }
+
+// ParseCacheLen returns the current number of entries in the expression parse
+// cache. This is useful for observability and tuning the cache size.
+func ParseCacheLen() int { return goarmfunctions.ParseCacheLen() }
+
 // RelatedResourceFinder looks up related resources for AINE/DINE existence checks.
 type RelatedResourceFinder interface {
 	Find(ctx context.Context, query RelatedResourceQuery) ([]Resource, error)
@@ -85,6 +106,21 @@ func WithFieldResolvers(resolve FieldResolverFunc, resolveArray FieldArrayResolv
 	return func(e *Engine) {
 		e.resolveField = resolve
 		e.resolveFieldArray = resolveArray
+	}
+}
+
+// WithParseCacheSize sets the maximum number of parsed ARM expression ASTs
+// held in the global LRU cache used by goarmfunctions. This is applied once
+// at Engine construction time and affects all Engine instances (the cache is
+// global). A size of 0 disables caching entirely.
+//
+// The default is [DefaultParseCacheSize] (1000 entries), which is appropriate
+// for most workloads. Increase the size when evaluating policies that contain
+// a large number of distinct ARM template expressions (e.g. thousands of
+// unique parameter/concat combinations).
+func WithParseCacheSize(size int) Option {
+	return func(e *Engine) {
+		goarmfunctions.SetParseCacheSize(size)
 	}
 }
 

@@ -8,8 +8,8 @@ github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/hexops/gotextdiff v1.0.3 h1:gitA9+qJrrTCsiCl7+kh75nPqQt1cx4ZkudSTLoUqJM=
 github.com/hexops/gotextdiff v1.0.3/go.mod h1:pSWU5MAI3yDq+fZBTazCSJysOMbxWL1BSow5/V2vxeg=
-github.com/matt-FFFFFF/goarmfunctions v0.4.0 h1:/x6z192K2vwONqd+z8JWt/YFiQuvBLALQ4wu5XmJ/sQ=
-github.com/matt-FFFFFF/goarmfunctions v0.4.0/go.mod h1:XI/DWHJEgbhKWwVYSdNo5tswIDkiAsOcrn8pLo/JKW4=
+github.com/matt-FFFFFF/goarmfunctions v0.5.0 h1:FkGEplXAQg1XzElMVdHRK3jqkEH5PNziSYJgQy7O/L4=
+github.com/matt-FFFFFF/goarmfunctions v0.5.0/go.mod h1:UCZaSdyiuYNk7PY3+h9Ay5pi8haaJiuAYBb5w6TAR+8=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/stretchr/testify v1.9.0 h1:HtqpIVDClZ4nwg75+f6Lvsy/wHu+3BoSGCbBAcpTsTg=

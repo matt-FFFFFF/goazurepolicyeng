@@ -1,9 +1,9 @@
 module github.com/matt-FFFFFF/goazurepolicyeng
 
-go 1.25.0
+go 1.25.7
 
 require (
-	github.com/matt-FFFFFF/goarmfunctions v0.4.0
+	github.com/matt-FFFFFF/goarmfunctions v0.5.0
 	github.com/stretchr/testify v1.9.0
 	github.com/tidwall/gjson v1.18.0
 )
