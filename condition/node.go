@@ -30,6 +30,10 @@ type EvalContext struct {
 	// ResolveCurrent returns the current count iteration value for the given name.
 	// Empty string means the default/unnamed scope.
 	ResolveCurrent func(name string) (any, bool)
+	// EvalExpressionWithCurrent evaluates an ARM expression with access to the current
+	// count scope's ResolveCurrent function. Set by the engine to support current() in
+	// count where clauses.
+	EvalExpressionWithCurrent func(expr string, resolveCurrent func(string) (any, bool)) (any, error)
 	Tracing        bool
 	Trace          *result.Trace
 	Reasons        []result.Reason // collected during evaluation
@@ -430,6 +434,21 @@ func (c *CountCondition) childContext(ctx *EvalContext, currentElement any) *Eva
 		}
 		v, ok := scopes[scopeName]
 		return v, ok
+	}
+
+	// Rebind EvalExpression so that current() in ARM expressions resolves
+	// against THIS child's count scopes, not the parent's.
+	if parentEval := ctx.EvalExpression; parentEval != nil {
+		resolveCurrent := childCtx.ResolveCurrent
+		childCtx.EvalExpression = func(expr string) (any, error) {
+			// Temporarily inject ResolveCurrent into the expression context
+			// by wrapping through the OnEvalExpression hook if set, or
+			// falling back to parent eval with current scope override.
+			if childCtx.EvalExpressionWithCurrent != nil {
+				return childCtx.EvalExpressionWithCurrent(expr, resolveCurrent)
+			}
+			return parentEval(expr)
+		}
 	}
 
 	return &childCtx
