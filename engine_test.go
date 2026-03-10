@@ -253,7 +253,7 @@ func TestEvaluateAll_ScopeFiltering(t *testing.T) {
 	}
 
 	definitions := map[string]*PolicyDefinition{"policy1": def}
-	results := eng.EvaluateAll(context.Background(), resource, assignments, definitions)
+	results := eng.EvaluateAll(context.Background(), resource, assignments, Catalog{Definitions: definitions})
 
 	// Only the first assignment should be evaluated
 	assert.Len(t, results, 1)
@@ -291,7 +291,7 @@ func TestEvaluateBulk_Parallel(t *testing.T) {
 		}
 	}
 
-	results := eng.EvaluateBulk(context.Background(), resources, assignments, definitions, 4)
+	results := eng.EvaluateBulk(context.Background(), resources, assignments, Catalog{Definitions: definitions}, 4)
 
 	assert.Len(t, results, 100)
 	for _, res := range results {
@@ -404,7 +404,7 @@ func TestEvaluateBulk_Cancellation(t *testing.T) {
 	}
 
 	// Just verify it completes without panic
-	results := eng.EvaluateBulk(context.Background(), resources, assignments, definitions, 2)
+	results := eng.EvaluateBulk(context.Background(), resources, assignments, Catalog{Definitions: definitions}, 2)
 	assert.Len(t, results, 10)
 }
 
@@ -497,7 +497,7 @@ func TestEvaluateBulk_WorkerCount(t *testing.T) {
 		resources[i] = Resource{ID: id, Type: "Microsoft.Storage/storageAccounts", Location: "eastus", Raw: json.RawMessage(raw)}
 	}
 
-	results := eng.EvaluateBulk(context.Background(), resources, assignments, definitions, 2)
+	results := eng.EvaluateBulk(context.Background(), resources, assignments, Catalog{Definitions: definitions}, 2)
 	assert.Len(t, results, 20)
 }
 
@@ -592,4 +592,103 @@ func TestEvaluate_NoTraceWhenDisabled(t *testing.T) {
 
 	assert.Equal(t, NonCompliant, result.State)
 	assert.Nil(t, result.Trace)
+}
+
+func TestEvaluateAll_MixedDirectAndInitiative(t *testing.T) {
+	eng := makeEngine(t)
+
+	// Direct policy definition
+	directDef := &PolicyDefinition{
+		ID:         "direct-policy",
+		PolicyRule: makePolicyRule(t, "type", "equals", "Microsoft.Storage/storageAccounts", "audit"),
+	}
+
+	// Initiative member policy definition
+	memberDef := &PolicyDefinition{
+		ID:         "member-policy",
+		PolicyRule: makePolicyRule(t, "location", "equals", "eastus", "deny"),
+	}
+
+	definitions := map[string]*PolicyDefinition{
+		"direct-policy": directDef,
+		"member-policy": memberDef,
+	}
+
+	// Policy set (initiative)
+	setDef := &PolicySetDefinition{
+		ID:   "initiative-1",
+		Name: "test-initiative",
+		PolicyDefinitions: []PolicyDefinitionReference{
+			{
+				PolicyDefinitionID:    "member-policy",
+				DefinitionReferenceID: "member-ref-1",
+				Parameters:            map[string]ParameterValue{},
+			},
+		},
+	}
+	setDefinitions := map[string]*PolicySetDefinition{
+		"initiative-1": setDef,
+	}
+
+	// Two assignments: one direct, one initiative
+	assignments := []Assignment{
+		{
+			ID:                 "assign-direct",
+			Scope:              "/subscriptions/sub1",
+			PolicyDefinitionID: "direct-policy",
+		},
+		{
+			ID:                 "assign-initiative",
+			Scope:              "/subscriptions/sub1",
+			PolicyDefinitionID: "initiative-1",
+		},
+	}
+
+	resource := makeResource(t, "/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Storage/storageAccounts/sa1",
+		"Microsoft.Storage/storageAccounts", "eastus")
+
+	catalog := Catalog{
+		Definitions:    definitions,
+		SetDefinitions: setDefinitions,
+	}
+
+	results := eng.EvaluateAll(context.Background(), resource, assignments, catalog)
+
+	// Should have 2 results: one from direct policy, one from initiative member
+	require.Len(t, results, 2)
+
+	// Direct policy result
+	assert.Equal(t, "assign-direct", results[0].AssignmentID)
+	assert.Equal(t, "direct-policy", results[0].PolicyID)
+	assert.Equal(t, NonCompliant, results[0].State)
+	assert.Equal(t, "audit", results[0].Effect)
+
+	// Initiative member result
+	assert.Equal(t, "assign-initiative", results[1].AssignmentID)
+	assert.Equal(t, "member-policy", results[1].PolicyID)
+	assert.Equal(t, NonCompliant, results[1].State)
+	assert.Equal(t, "deny", results[1].Effect)
+}
+
+func TestEvaluateAll_InitiativeOnlySkippedWithoutSetDefs(t *testing.T) {
+	eng := makeEngine(t)
+
+	assignments := []Assignment{
+		{
+			ID:                 "assign-initiative",
+			Scope:              "/subscriptions/sub1",
+			PolicyDefinitionID: "initiative-1",
+		},
+	}
+
+	resource := makeResource(t, "/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Storage/storageAccounts/sa1",
+		"Microsoft.Storage/storageAccounts", "eastus")
+
+	// No set definitions in catalog — initiative assignment should be silently skipped
+	catalog := Catalog{
+		Definitions: map[string]*PolicyDefinition{},
+	}
+
+	results := eng.EvaluateAll(context.Background(), resource, assignments, catalog)
+	assert.Len(t, results, 0)
 }

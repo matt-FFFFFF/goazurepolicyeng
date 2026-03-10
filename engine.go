@@ -337,43 +337,65 @@ func mergeParameters(assigned map[string]ParameterValue, defined map[string]Para
 	return merged
 }
 
+// Catalog holds the set of policy definitions and policy set (initiative)
+// definitions available for evaluation.
+type Catalog struct {
+	Definitions    map[string]*PolicyDefinition
+	SetDefinitions map[string]*PolicySetDefinition
+}
+
+// isApplicable checks scope, notScopes, and resource selectors for an assignment.
+func isAssignmentApplicable(a *Assignment, resource *Resource) bool {
+	scopeSelectors := make([]scope.ResourceSelector, len(a.ResourceSelectors))
+	for j, rs := range a.ResourceSelectors {
+		sels := make([]scope.SelectorExpression, len(rs.Selectors))
+		for k, s := range rs.Selectors {
+			sels[k] = scope.SelectorExpression{Kind: s.Kind, In: s.In, NotIn: s.NotIn}
+		}
+		scopeSelectors[j] = scope.ResourceSelector{Name: rs.Name, Selectors: sels}
+	}
+	return scope.IsApplicable(a.Scope, a.NotScopes, scopeSelectors, resource.ID, resource.Location, resource.Type)
+}
+
 // EvaluateAll evaluates all applicable policies against a single resource.
-func (e *Engine) EvaluateAll(ctx context.Context, resource *Resource, assignments []Assignment, definitions map[string]*PolicyDefinition) []EvaluationResult {
+// It handles both direct policy assignments and initiative (policy set) assignments.
+func (e *Engine) EvaluateAll(ctx context.Context, resource *Resource, assignments []Assignment, catalog Catalog) []EvaluationResult {
 	var results []EvaluationResult
 	for i := range assignments {
 		a := &assignments[i]
-		def, ok := definitions[a.PolicyDefinitionID]
-		if !ok {
-			continue
-		}
 
 		// Applicability check: includes scope, notScopes, and any resource selectors.
-		scopeSelectors := make([]scope.ResourceSelector, len(a.ResourceSelectors))
-		for j, rs := range a.ResourceSelectors {
-			sels := make([]scope.SelectorExpression, len(rs.Selectors))
-			for k, s := range rs.Selectors {
-				sels[k] = scope.SelectorExpression{Kind: s.Kind, In: s.In, NotIn: s.NotIn}
-			}
-			scopeSelectors[j] = scope.ResourceSelector{Name: rs.Name, Selectors: sels}
-		}
-		if !scope.IsApplicable(a.Scope, a.NotScopes, scopeSelectors, resource.ID, resource.Location, resource.Type) {
+		if !isAssignmentApplicable(a, resource) {
 			continue
 		}
 
-		result := e.Evaluate(ctx, EvaluateInput{
-			Definition: def,
-			Assignment: a,
-			Resource:   resource,
-		})
-		result.PolicyID = def.ID
-		result.AssignmentID = a.ID
-		results = append(results, result)
+		// Try direct policy definition first.
+		if def, ok := catalog.Definitions[a.PolicyDefinitionID]; ok {
+			result := e.Evaluate(ctx, EvaluateInput{
+				Definition: def,
+				Assignment: a,
+				Resource:   resource,
+			})
+			result.PolicyID = def.ID
+			result.AssignmentID = a.ID
+			results = append(results, result)
+			continue
+		}
+
+		// Try policy set (initiative) definition.
+		if catalog.SetDefinitions != nil {
+			if setDef, ok := catalog.SetDefinitions[a.PolicyDefinitionID]; ok {
+				initResults := e.EvaluateInitiative(ctx, resource, a, setDef, catalog.Definitions)
+				results = append(results, initResults...)
+			}
+		}
 	}
 	return results
 }
 
 // EvaluateBulk evaluates all policies against multiple resources using a worker pool.
-func (e *Engine) EvaluateBulk(ctx context.Context, resources []Resource, assignments []Assignment, definitions map[string]*PolicyDefinition, workers int) map[string][]EvaluationResult {
+// It handles both direct policy assignments and initiative (policy set) assignments.
+func (e *Engine) EvaluateBulk(ctx context.Context, resources []Resource, assignments []Assignment, catalog Catalog, workers int) map[string][]EvaluationResult {
 	if workers <= 0 {
 		workers = runtime.NumCPU()
 	}
@@ -397,7 +419,7 @@ func (e *Engine) EvaluateBulk(ctx context.Context, resources []Resource, assignm
 					if !ok {
 						return
 					}
-					res := e.EvaluateAll(ctx, r, assignments, definitions)
+					res := e.EvaluateAll(ctx, r, assignments, catalog)
 
 					mu.Lock()
 					results[r.ID] = res
