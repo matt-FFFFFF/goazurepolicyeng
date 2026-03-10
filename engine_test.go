@@ -100,7 +100,7 @@ func makeResource(t *testing.T, id, typ, location string) *Resource {
 	}
 }
 
-func makePolicyRule(t *testing.T, field, operator string, value any, effectStr string) json.RawMessage {
+func makePolicyRule(t testing.TB, field, operator string, value any, effectStr string) json.RawMessage {
 	t.Helper()
 	valJSON, err := json.Marshal(value)
 	require.NoError(t, err)
@@ -1187,4 +1187,3 @@ func TestEvaluate_RequestContext(t *testing.T) {
 
 	assert.Equal(t, NonCompliant, result.State, "requestContext().apiVersion should be empty string, matching equals ''")
 }
-
