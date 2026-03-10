@@ -225,10 +225,11 @@ func (e *Engine) evalExpression(ctx context.Context, expr string, assignmentPara
 		}
 	}
 
-	// goarmfunctions EvalContext: parameters('x') looks up evalCtx["x"]
-	evalCtx := armparser.EvalContext(paramScope)
+	// goarmfunctions: build scope chain and evaluate with registry
+	evalCtx := armparser.FromMap(paramScope)
+	registry := armparser.DefaultRegistry()
 
-	result, err := goarmfunctions.LexAndParse(ctx, expr, evalCtx, nil)
+	result, err := goarmfunctions.Evaluate(ctx, expr, evalCtx, registry, nil)
 	if err != nil {
 		return nil, fmt.Errorf("evaluating expression %q: %w", expr, err)
 	}
