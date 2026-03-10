@@ -116,14 +116,18 @@ result := engine.Evaluate(ctx, goazurepolicyeng.EvaluateInput{
 ### All policies against one resource
 
 ```go
-results := engine.EvaluateAll(ctx, resource, assignments, definitions)
+catalog := goazurepolicyeng.Catalog{
+	Definitions:    definitions,
+	SetDefinitions: nil, // optional, for initiative support
+}
+results := engine.EvaluateAll(ctx, resource, assignments, catalog)
 ```
 
 ### Bulk evaluation (parallel)
 
 ```go
 // Returns map[resourceID][]EvaluationResult
-results := engine.EvaluateBulk(ctx, resources, assignments, definitions, workers)
+results := engine.EvaluateBulk(ctx, resources, assignments, catalog, workers)
 ```
 
 ### Initiative evaluation
